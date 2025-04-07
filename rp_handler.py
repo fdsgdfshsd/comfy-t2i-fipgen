@@ -1,5 +1,5 @@
-# rp_handler.py
 import nest_asyncio
+
 nest_asyncio.apply()
 
 import runpod
@@ -18,44 +18,45 @@ logger = logging.getLogger(__name__)
 ################################################################################
 # Константы для ожидания
 ################################################################################
-S3_TIMEOUT_SEC = 300       # Общее время ожидания появления файла на S3 (сек)
-S3_POLL_INTERVAL = 1.0     # Интервал опроса (сек)
-MIN_FILESIZE = 1000        # Порог байт, чтобы считать «файл появился»
+S3_TIMEOUT_SEC = 300  # Общее время ожидания появления файла на S3 (сек)
+S3_POLL_INTERVAL = 1.0  # Интервал опроса (сек)
+MIN_FILESIZE = 1000  # Порог байт, чтобы считать «файл появился»
 
 
 ################################################################################
-# Основная функция handler, вызываемая RunPod
+# Главный handler
 ################################################################################
 def handler(event: dict) -> dict:
     """
-    Ожидает структуру:
+    Ожидаем структуру:
     {
-      "prompt": {...},
-      "s3_settings": {
-        "endpoint": "...",
-        "bucket": "...",
-        "folder": "...",
-        "filename": "..."
+      "input": {
+        "prompt": {...},
+        "s3_settings": {
+          "endpoint": "...",
+          "bucket": "...",
+          "folder": "...",
+          "filename": "..."
+        }
       }
     }
     """
-    # 1) Забираем "prompt" как есть
-    prompt_data = event.get("prompt")
-    if not prompt_data:
-        return {"error": "No 'prompt' field in the incoming event"}
+    # 1) Извлекаем поле "input"
+    job_input = event.get("input", {})
 
-    # 2) Забираем s3_settings
-    s3_data = event.get("s3_settings", {})
+    # 2) Извлекаем "prompt" и "s3_settings" из "input"
+    prompt_data = job_input.get("prompt")
+    if not prompt_data:
+        return {"error": "No 'prompt' field inside 'input'."}
+
+    s3_data = job_input.get("s3_settings", {})
     s3_endpoint = s3_data.get("endpoint", "https://example-s3.com")
     s3_bucket = s3_data.get("bucket", "my-bucket")
     s3_folder = s3_data.get("folder", "my-folder")
     filename = s3_data.get("filename", "generated_image.png")
 
     # 3) Отправляем payload в ComfyUI
-    #    Важно, что ComfyUI ждёт JSON вида:
-    #    { "prompt": { ... } }
-    #    А не { "70": {...}, ... } без верха "prompt".
-    comfy_payload = {"prompt": prompt_data}
+    comfy_payload = {"prompt": prompt_data}  # ComfyUI ждёт ключ "prompt" на верхнем уровне
     comfy_url = "http://127.0.0.1:8188/prompt"
 
     try:
@@ -66,7 +67,7 @@ def handler(event: dict) -> dict:
         logger.error(f"Error sending prompt to ComfyUI: {e}")
         return {"error": str(e)}
 
-    # 4) Формируем s3_url и ждём, пока файл появится
+    # 4) Формируем s3_url и ждём появления файла
     s3_url = f"{s3_endpoint}/{s3_bucket}/{s3_folder}/{filename}"
     logger.info(f"Will wait for file to appear on S3: {s3_url}")
 
@@ -80,13 +81,14 @@ def handler(event: dict) -> dict:
             "s3_url": s3_url
         }
 
-    # 5) Скачиваем файл и возвращаем base64
+    # 5) Скачиваем файл, кодируем base64
     try:
         base64_img = loop.run_until_complete(download_file_as_base64(s3_url))
     except Exception as e:
         logger.error(f"Error downloading file from S3: {e}")
         return {"error": f"Error downloading from S3: {str(e)}"}
 
+    # 6) Возвращаем результат
     return {
         "status": "success",
         "s3_url": s3_url,
@@ -95,12 +97,12 @@ def handler(event: dict) -> dict:
 
 
 ################################################################################
-# Функции для poll'а S3 и скачивания
+# Функции для опроса S3
 ################################################################################
 async def wait_for_file_on_s3(url: str, timeout: float) -> bool:
     """
-    Периодически делает HEAD-запрос к url, пока не увидит файл нужного размера (MIN_FILESIZE).
-    Возвращает True, если дождались; False, если по таймауту файл так и не появился.
+    Периодически делает HEAD-запрос к url, пока не увидит файл
+    >= MIN_FILESIZE. Возвращает True, если дождались; False — если таймаут.
     """
     start_time = time.time()
     while time.time() - start_time < timeout:
@@ -113,8 +115,7 @@ async def wait_for_file_on_s3(url: str, timeout: float) -> bool:
 
 async def get_file_size(url: str) -> int:
     """
-    HEAD-запрос к S3. Если статус 200 и есть Content-Length,
-    возвращаем его как int. Иначе 0.
+    HEAD-запрос к S3. Если статус=200 и есть Content-Length, возвращаем его int. Иначе 0.
     """
     try:
         async with ClientSession() as session:
@@ -130,16 +131,17 @@ async def get_file_size(url: str) -> int:
 
 async def download_file_as_base64(url: str) -> str:
     """
-    GET-запрос к S3, скачиваем файл в память, кодируем в base64.
+    GET-запрос к S3, скачиваем файл в память, кодируем base64.
     """
     import base64
     async with ClientSession() as session:
         async with session.get(url) as resp:
             if resp.status != 200:
-                txt = await resp.text()
-                raise Exception(f"GET {url} failed {resp.status}: {txt}")
+                text = await resp.text()
+                raise Exception(f"GET {url} failed {resp.status}: {text}")
             data = await resp.read()
     return base64.b64encode(data).decode("utf-8")
+
 
 ################################################################################
 # Точка входа
