@@ -1,29 +1,15 @@
 #!/usr/bin/env bash
 set -e
 
-SNAPSHOT_DIR="/snapshot"
-PORT="${PORT:-8188}"
-
-# ─────────────────────────────────────────────────────────────────────────────
-if [[ -f "${SNAPSHOT_DIR}/dump.log" ]]; then
-    echo "[+] Snapshot found, restoring..."
-    criu restore -D "${SNAPSHOT_DIR}" --shell-job
-    exit
-fi
-
 echo "[+] Launching ComfyUI..."
-python /app/ComfyUI/main.py --listen 0.0.0.0 --port "${PORT}" &
-PID=$!
+python /app/ComfyUI/main.py --listen 0.0.0.0 --port 8188 &
+COMFY_PID=$!
 
-echo "[+] Waiting for UI to become ready..."
-until curl -s "http://127.0.0.1:${PORT}/prompt" >/dev/null; do
-    sleep 2
+echo "[+] Waiting for ComfyUI to become ready..."
+until curl -s http://127.0.0.1:8188/prompt >/dev/null; do
+    echo "    …still starting, wait 5 s"
+    sleep 5
 done
-echo "    UI is up (pid=${PID})"
+echo "[+] ComfyUI is ready (pid=${COMFY_PID}). Starting rp_handler."
 
-echo "[+] Creating snapshot..."
-mkdir -p "${SNAPSHOT_DIR}"
-criu dump -t "${PID}" -D "${SNAPSHOT_DIR}" --shell-job --leave-running
-
-echo "[+] Dump complete. ComfyUI continues to run."
-wait "${PID}"
+exec python -u rp_handler.py
